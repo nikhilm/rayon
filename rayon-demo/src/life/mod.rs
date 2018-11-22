@@ -14,6 +14,9 @@ Options:
     -h, --help      Show this message.
 ";
 
+extern crate serde_json;
+extern crate vignette;
+
 use rand::distributions::Standard;
 use rand::{thread_rng, Rng};
 use std::iter::repeat;
@@ -21,10 +24,14 @@ use std::num::Wrapping;
 use std::sync::Arc;
 use std::thread;
 use time;
+use std::sync::atomic::AtomicBool;
+use std::thread::JoinHandle;
 
 use docopt::Docopt;
 use rayon::iter::ParallelBridge;
 use rayon::prelude::*;
+
+use self::vignette::{get_current_thread, is_current_thread, thread_iterator, Profiler, output::Outputter};
 
 #[cfg(test)]
 mod bench;
@@ -46,6 +53,31 @@ pub struct Board {
     born: Arc<Vec<usize>>,
     rows: usize,
     cols: usize,
+}
+
+fn run_profiler() -> (Arc<AtomicBool>, JoinHandle<()>) {
+    let running = Arc::new(AtomicBool::new(true));
+    let running2 = running.clone();
+    let jh = std::thread::spawn(move || {
+        let mut profiler = Profiler::new();
+
+        while running2.load(std::sync::atomic::Ordering::Relaxed) {
+            let threads = thread_iterator().expect("iter");
+            for res in threads {
+                let thread = res.expect("thread");
+                if is_current_thread(&thread) {
+                    continue;
+                }
+                profiler.sample_thread(thread);
+            }
+            std::thread::sleep_ms(10);
+        }
+
+        let mut outputter = Outputter::new();
+        let output_profile = outputter.output(profiler.finish());
+        serde_json::to_writer_pretty(std::io::stdout(), &output_profile).unwrap();
+    });
+    (running, jh)
 }
 
 impl Board {
@@ -290,22 +322,25 @@ pub fn main(args: &[String]) {
     }
 
     if args.cmd_play {
-        let serial = measure_cpu(generations_limited, &args);
-        println!("  serial: {:.2} fps", serial.actual_fps);
-        if let Some(cpu_usage) = serial.cpu_usage_percent {
-            println!("    cpu usage: {:.1}%", cpu_usage);
-        }
+        // let serial = measure_cpu(generations_limited, &args);
+        // println!("  serial: {:.2} fps", serial.actual_fps);
+        // if let Some(cpu_usage) = serial.cpu_usage_percent {
+        //     println!("    cpu usage: {:.1}%", cpu_usage);
+        // }
 
+        let (running, jh) = run_profiler();
         let parallel = measure_cpu(parallel_generations_limited, &args);
-        println!("parallel: {:.2} fps", parallel.actual_fps);
+        // println!("parallel: {:.2} fps", parallel.actual_fps);
         if let Some(cpu_usage) = parallel.cpu_usage_percent {
-            println!("  cpu usage: {:.1}%", cpu_usage);
+            // println!("  cpu usage: {:.1}%", cpu_usage);
         }
+        running.store(false, std::sync::atomic::Ordering::Relaxed);
+        jh.join().unwrap();
 
-        let par_bridge = measure_cpu(par_bridge_generations_limited, &args);
-        println!("par_bridge: {:.2} fps", par_bridge.actual_fps);
-        if let Some(cpu_usage) = par_bridge.cpu_usage_percent {
-            println!("  cpu usage: {:.1}%", cpu_usage);
-        }
+        // let par_bridge = measure_cpu(par_bridge_generations_limited, &args);
+        // println!("par_bridge: {:.2} fps", par_bridge.actual_fps);
+        // if let Some(cpu_usage) = par_bridge.cpu_usage_percent {
+        //     println!("  cpu usage: {:.1}%", cpu_usage);
+        // }
     }
 }
